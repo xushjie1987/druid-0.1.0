@@ -19,6 +19,19 @@
 
 package com.metamx.druid;
 
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.util.List;
+import java.util.Properties;
+import java.util.concurrent.ScheduledExecutorService;
+
+import org.I0Itec.zkclient.ZkClient;
+import org.codehaus.jackson.map.ObjectMapper;
+import org.codehaus.jackson.map.jsontype.NamedType;
+import org.codehaus.jackson.smile.SmileFactory;
+import org.mortbay.jetty.Server;
+import org.skife.config.ConfigurationObjectFactory;
+
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
@@ -47,367 +60,327 @@ import com.metamx.metrics.MonitorScheduler;
 import com.metamx.metrics.MonitorSchedulerConfig;
 import com.metamx.metrics.SysMonitor;
 import com.metamx.phonebook.PhoneBook;
-import org.I0Itec.zkclient.ZkClient;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.map.jsontype.NamedType;
-import org.codehaus.jackson.smile.SmileFactory;
-import org.mortbay.jetty.Server;
-import org.skife.config.ConfigurationObjectFactory;
-
-import java.io.IOException;
-import java.lang.reflect.Field;
-import java.util.List;
-import java.util.Properties;
-import java.util.concurrent.ScheduledExecutorService;
 
 /**
  */
-public abstract class BaseNode<T extends BaseNode>
-{
-  private final Logger log;
-
-  private final Lifecycle lifecycle;
-  private final ObjectMapper jsonMapper;
-  private final ObjectMapper smileMapper;
-  private final Properties props;
-  private final ConfigurationObjectFactory configFactory;
-
-  private PhoneBook phoneBook = null;
-  private ServiceEmitter emitter = null;
-  private List<Monitor> monitors = null;
-  private Server server = null;
-  private ZkClient zkClient;
-  private ScheduledExecutorFactory scheduledExecutorFactory;
-  private RequestLogger requestLogger;
-
-  private boolean initialized = false;
-
-  public BaseNode(
-      Logger log,
-      Properties props,
-      Lifecycle lifecycle,
-      ObjectMapper jsonMapper,
-      ObjectMapper smileMapper,
-      ConfigurationObjectFactory configFactory
-  )
-  {
-    this.log = log;
-    this.configFactory = configFactory;
-    this.props = props;
-    this.jsonMapper = jsonMapper;
-    this.lifecycle = lifecycle;
-    this.smileMapper = smileMapper;
-
-    Preconditions.checkNotNull(props, "props");
-    Preconditions.checkNotNull(lifecycle, "lifecycle");
-    Preconditions.checkNotNull(jsonMapper, "jsonMapper");
-    Preconditions.checkNotNull(smileMapper, "smileMapper");
-    Preconditions.checkNotNull(configFactory, "configFactory");
-
-    Preconditions.checkState(smileMapper.getJsonFactory() instanceof SmileFactory, "smileMapper should use smile.");
-  }
-
-  @SuppressWarnings("unchecked")
-  public T setZkClient(ZkClient zkClient)
-  {
-    checkFieldNotSetAndSet("zkClient", zkClient);
-    return (T) this;
-  }
-
-  @SuppressWarnings("unchecked")
-  public T setPhoneBook(PhoneBook phoneBook)
-  {
-    checkFieldNotSetAndSet("phoneBook", phoneBook);
-    return (T) this;
-  }
-
-  @SuppressWarnings("unchecked")
-  public T setEmitter(ServiceEmitter emitter)
-  {
-    checkFieldNotSetAndSet("emitter", emitter);
-    return (T) this;
-  }
-
-  @SuppressWarnings("unchecked")
-  public T setMonitors(List<Monitor> monitors)
-  {
-    checkFieldNotSetAndSet("monitors", monitors);
-    return (T) this;
-  }
-
-  @SuppressWarnings("unchecked")
-  public T setServer(Server server)
-  {
-    checkFieldNotSetAndSet("server", server);
-    return (T) this;
-  }
-
-  @SuppressWarnings("unchecked")
-  public T setScheduledExecutorFactory(ScheduledExecutorFactory factory)
-  {
-    checkFieldNotSetAndSet("scheduledExecutorFactory", factory);
-    return (T) this;
-  }
-
-  @SuppressWarnings("unchecked")
-  public T setRequestLogger(RequestLogger requestLogger)
-  {
-    checkFieldNotSetAndSet("requestLogger", requestLogger);
-    return (T) this;
-  }
-
-
-  @SuppressWarnings("unchecked")
-  public T registerJacksonSubtype(Class<?>... clazzes)
-  {
-    jsonMapper.registerSubtypes(clazzes);
-    smileMapper.registerSubtypes(clazzes);
-    return (T) this;
-  }
-
-  @SuppressWarnings("unchecked")
-  public T registerJacksonSubtype(NamedType... namedTypes)
-  {
-    jsonMapper.registerSubtypes(namedTypes);
-    smileMapper.registerSubtypes(namedTypes);
-    return (T) this;
-  }
-
-  @SuppressWarnings("unchecked")
-  public T registerHandler(Registererer registererer)
-  {
-    registererer.register();
-    return (T) this;
-  }
-
-  public Lifecycle getLifecycle()
-  {
-    return lifecycle;
-  }
-
-  public ObjectMapper getJsonMapper()
-  {
-    return jsonMapper;
-  }
-
-  public ObjectMapper getSmileMapper()
-  {
-    return smileMapper;
-  }
-
-  public Properties getProps()
-  {
-    return props;
-  }
-
-  public ConfigurationObjectFactory getConfigFactory()
-  {
-    return configFactory;
-  }
-
-  public ZkClient getZkClient()
-  {
-    initializeZkClient();
-    return zkClient;
-  }
-
-  public PhoneBook getPhoneBook()
-  {
-    initializePhoneBook();
-    return phoneBook;
-  }
-
-  public ServiceEmitter getEmitter()
-  {
-    initializeEmitter();
-    return emitter;
-  }
-
-  public List<Monitor> getMonitors()
-  {
-    initializeMonitors();
-    return monitors;
-  }
-
-  public Server getServer()
-  {
-    initializeServer();
-    return server;
-  }
-
-  public ScheduledExecutorFactory getScheduledExecutorFactory()
-  {
-    initializeScheduledExecutorFactory();
-    return scheduledExecutorFactory;
-  }
-
-  public RequestLogger getRequestLogger()
-  {
-    initializeRequestLogger();
-    return requestLogger;
-  }
-
-  private void initializeRequestLogger()
-  {
-    if (requestLogger == null) {
-      try {
-        setRequestLogger(Initialization.makeRequestLogger(getScheduledExecutorFactory(), getProps()));
-      }
-      catch (IOException e) {
-        throw Throwables.propagate(e);
-      }
-      lifecycle.addManagedInstance(requestLogger);
+public abstract class BaseNode<T extends BaseNode> {
+    private final Logger                     log;
+    
+    private final Lifecycle                  lifecycle;
+    private final ObjectMapper               jsonMapper;
+    private final ObjectMapper               smileMapper;
+    private final Properties                 props;
+    private final ConfigurationObjectFactory configFactory;
+    
+    private PhoneBook                        phoneBook   = null;
+    private ServiceEmitter                   emitter     = null;
+    private List<Monitor>                    monitors    = null;
+    private Server                           server      = null;
+    private ZkClient                         zkClient;
+    private ScheduledExecutorFactory         scheduledExecutorFactory;
+    private RequestLogger                    requestLogger;
+    
+    private boolean                          initialized = false;
+    
+    public BaseNode(Logger log,
+                    Properties props,
+                    Lifecycle lifecycle,
+                    ObjectMapper jsonMapper,
+                    ObjectMapper smileMapper,
+                    ConfigurationObjectFactory configFactory) {
+        this.log = log;
+        this.configFactory = configFactory;
+        this.props = props;
+        this.jsonMapper = jsonMapper;
+        this.lifecycle = lifecycle;
+        this.smileMapper = smileMapper;
+        
+        Preconditions.checkNotNull(props,
+                                   "props");
+        Preconditions.checkNotNull(lifecycle,
+                                   "lifecycle");
+        Preconditions.checkNotNull(jsonMapper,
+                                   "jsonMapper");
+        Preconditions.checkNotNull(smileMapper,
+                                   "smileMapper");
+        Preconditions.checkNotNull(configFactory,
+                                   "configFactory");
+        
+        Preconditions.checkState(smileMapper.getJsonFactory() instanceof SmileFactory,
+                                 "smileMapper should use smile.");
     }
-  }
-
-  private void initializeScheduledExecutorFactory()
-  {
-    if (scheduledExecutorFactory == null) {
-      setScheduledExecutorFactory(ScheduledExecutors.createFactory(getLifecycle()));
+    
+    @SuppressWarnings("unchecked")
+    public T setZkClient(ZkClient zkClient) {
+        checkFieldNotSetAndSet("zkClient",
+                               zkClient);
+        return (T) this;
     }
-  }
-
-  private void initializeZkClient()
-  {
-    if (zkClient == null) {
-      setZkClient(Initialization.makeZkClient(configFactory.build(ZkClientConfig.class), lifecycle));
+    
+    @SuppressWarnings("unchecked")
+    public T setPhoneBook(PhoneBook phoneBook) {
+        checkFieldNotSetAndSet("phoneBook",
+                               phoneBook);
+        return (T) this;
     }
-  }
-
-  private void initializePhoneBook()
-  {
-    if (phoneBook == null) {
-      setPhoneBook(
-          Initialization.createPhoneBook(
-              jsonMapper,
-              getZkClient(),
-              "PhoneBook--%s",
-              lifecycle
-          )
-      );
+    
+    @SuppressWarnings("unchecked")
+    public T setEmitter(ServiceEmitter emitter) {
+        checkFieldNotSetAndSet("emitter",
+                               emitter);
+        return (T) this;
     }
-  }
-
-  private void initializeServer()
-  {
-    if (server == null) {
-      setServer(Initialization.makeJettyServer(configFactory.build(ServerConfig.class)));
-
-      lifecycle.addHandler(
-          new Lifecycle.Handler()
-          {
-            @Override
-            public void start() throws Exception
-            {
-              log.info("Starting Jetty");
-              server.start();
+    
+    @SuppressWarnings("unchecked")
+    public T setMonitors(List<Monitor> monitors) {
+        checkFieldNotSetAndSet("monitors",
+                               monitors);
+        return (T) this;
+    }
+    
+    @SuppressWarnings("unchecked")
+    public T setServer(Server server) {
+        checkFieldNotSetAndSet("server",
+                               server);
+        return (T) this;
+    }
+    
+    @SuppressWarnings("unchecked")
+    public T setScheduledExecutorFactory(ScheduledExecutorFactory factory) {
+        checkFieldNotSetAndSet("scheduledExecutorFactory",
+                               factory);
+        return (T) this;
+    }
+    
+    @SuppressWarnings("unchecked")
+    public T setRequestLogger(RequestLogger requestLogger) {
+        checkFieldNotSetAndSet("requestLogger",
+                               requestLogger);
+        return (T) this;
+    }
+    
+    @SuppressWarnings("unchecked")
+    public T registerJacksonSubtype(Class<?>... clazzes) {
+        jsonMapper.registerSubtypes(clazzes);
+        smileMapper.registerSubtypes(clazzes);
+        return (T) this;
+    }
+    
+    @SuppressWarnings("unchecked")
+    public T registerJacksonSubtype(NamedType... namedTypes) {
+        jsonMapper.registerSubtypes(namedTypes);
+        smileMapper.registerSubtypes(namedTypes);
+        return (T) this;
+    }
+    
+    @SuppressWarnings("unchecked")
+    public T registerHandler(Registererer registererer) {
+        registererer.register();
+        return (T) this;
+    }
+    
+    public Lifecycle getLifecycle() {
+        return lifecycle;
+    }
+    
+    public ObjectMapper getJsonMapper() {
+        return jsonMapper;
+    }
+    
+    public ObjectMapper getSmileMapper() {
+        return smileMapper;
+    }
+    
+    public Properties getProps() {
+        return props;
+    }
+    
+    public ConfigurationObjectFactory getConfigFactory() {
+        return configFactory;
+    }
+    
+    public ZkClient getZkClient() {
+        initializeZkClient();
+        return zkClient;
+    }
+    
+    public PhoneBook getPhoneBook() {
+        initializePhoneBook();
+        return phoneBook;
+    }
+    
+    public ServiceEmitter getEmitter() {
+        initializeEmitter();
+        return emitter;
+    }
+    
+    public List<Monitor> getMonitors() {
+        initializeMonitors();
+        return monitors;
+    }
+    
+    public Server getServer() {
+        initializeServer();
+        return server;
+    }
+    
+    public ScheduledExecutorFactory getScheduledExecutorFactory() {
+        initializeScheduledExecutorFactory();
+        return scheduledExecutorFactory;
+    }
+    
+    public RequestLogger getRequestLogger() {
+        initializeRequestLogger();
+        return requestLogger;
+    }
+    
+    private void initializeRequestLogger() {
+        if (requestLogger == null) {
+            try {
+                setRequestLogger(Initialization.makeRequestLogger(getScheduledExecutorFactory(),
+                                                                  getProps()));
+            } catch (IOException e) {
+                throw Throwables.propagate(e);
             }
-
-            @Override
-            public void stop()
-            {
-              log.info("Stopping Jetty");
-              try {
-                server.stop();
-              }
-              catch (Exception e) {
-                log.error(e, "Exception thrown while stopping Jetty");
-              }
+            lifecycle.addManagedInstance(requestLogger);
+        }
+    }
+    
+    private void initializeScheduledExecutorFactory() {
+        if (scheduledExecutorFactory == null) {
+            setScheduledExecutorFactory(ScheduledExecutors.createFactory(getLifecycle()));
+        }
+    }
+    
+    private void initializeZkClient() {
+        if (zkClient == null) {
+            setZkClient(Initialization.makeZkClient(configFactory.build(ZkClientConfig.class),
+                                                    lifecycle));
+        }
+    }
+    
+    private void initializePhoneBook() {
+        if (phoneBook == null) {
+            setPhoneBook(Initialization.createPhoneBook(jsonMapper,
+                                                        getZkClient(),
+                                                        "PhoneBook--%s",
+                                                        lifecycle));
+        }
+    }
+    
+    private void initializeServer() {
+        if (server == null) {
+            setServer(Initialization.makeJettyServer(configFactory.build(ServerConfig.class)));
+            
+            lifecycle.addHandler(new Lifecycle.Handler() {
+                @Override
+                public void start() throws Exception {
+                    log.info("Starting Jetty");
+                    server.start();
+                }
+                
+                @Override
+                public void stop() {
+                    log.info("Stopping Jetty");
+                    try {
+                        server.stop();
+                    } catch (Exception e) {
+                        log.error(e,
+                                  "Exception thrown while stopping Jetty");
+                    }
+                }
+            });
+        }
+    }
+    
+    private void initializeMonitors() {
+        if (monitors == null) {
+            List<Monitor> theMonitors = Lists.newArrayList();
+            theMonitors.add(new JvmMonitor());
+            if (Boolean.parseBoolean(props.getProperty("druid.monitoring.monitorSystem",
+                                                       "false"))) {
+                theMonitors.add(new SysMonitor());
             }
-          }
-      );
+            
+            setMonitors(theMonitors);
+        }
     }
-  }
-
-  private void initializeMonitors()
-  {
-    if (monitors == null) {
-      List<Monitor> theMonitors = Lists.newArrayList();
-      theMonitors.add(new JvmMonitor());
-      if (Boolean.parseBoolean(props.getProperty("druid.monitoring.monitorSystem", "false"))) {
-        theMonitors.add(new SysMonitor());
-      }
-
-      setMonitors(theMonitors);
+    
+    private void initializeEmitter() {
+        if (emitter == null) {
+            final HttpClient httpClient = HttpClientInit.createClient(HttpClientConfig.builder()
+                                                                                      .withNumConnections(1)
+                                                                                      .build(),
+                                                                      lifecycle);
+            
+            setEmitter(new ServiceEmitter(PropUtils.getProperty(props,
+                                                                "druid.service"),
+                                          PropUtils.getProperty(props,
+                                                                "druid.host"),
+                                          Emitters.create(props,
+                                                          httpClient,
+                                                          jsonMapper,
+                                                          lifecycle)));
+        }
+        EmittingLogger.registerEmitter(emitter);
     }
-  }
-
-  private void initializeEmitter()
-  {
-    if (emitter == null) {
-      final HttpClient httpClient = HttpClientInit.createClient(
-          HttpClientConfig.builder().withNumConnections(1).build(), lifecycle
-      );
-
-      setEmitter(
-          new ServiceEmitter(
-              PropUtils.getProperty(props, "druid.service"),
-              PropUtils.getProperty(props, "druid.host"),
-              Emitters.create(props, httpClient, jsonMapper, lifecycle)
-          )
-      );
+    
+    protected void init() throws Exception {
+        doInit();
+        initialized = true;
     }
-    EmittingLogger.registerEmitter(emitter);
-  }
-
-  protected void init() throws Exception
-  {
-    doInit();
-    initialized = true;
-  }
-
-  protected abstract void doInit() throws Exception;
-
-  @LifecycleStart
-  public synchronized void start() throws Exception
-  {
-    if (! initialized) {
-      init();
+    
+    protected abstract void doInit() throws Exception;
+    
+    @LifecycleStart
+    public synchronized void start() throws Exception {
+        if (!initialized) {
+            init();
+        }
+        
+        lifecycle.start();
     }
-
-    lifecycle.start();
-  }
-
-  @LifecycleStop
-  public synchronized void stop()
-  {
-    lifecycle.stop();
-  }
-
-  protected ScheduledExecutorService startMonitoring(List<Monitor> monitors)
-  {
-    final ScheduledExecutorService globalScheduledExec = getScheduledExecutorFactory().create(1, "Global--%d");
-    final MonitorScheduler monitorScheduler = new MonitorScheduler(
-        getConfigFactory().build(MonitorSchedulerConfig.class),
-        globalScheduledExec,
-        getEmitter(),
-        monitors
-    );
-    getLifecycle().addManagedInstance(monitorScheduler);
-    return globalScheduledExec;
-  }
-
-  protected void checkFieldNotSetAndSet(String fieldName, Object value)
-  {
-    Class<?> theClazz = this.getClass();
-    while (theClazz != null && theClazz != Object.class) {
-      try {
-        final Field field = theClazz.getDeclaredField(fieldName);
-        field.setAccessible(true);
-        Preconditions.checkState(field.get(this) == null, "Cannot set %s once it has already been set.", fieldName);
-
-        field.set(this, value);
-        return;
-      }
-      catch (NoSuchFieldException e) {
-        // Perhaps it is inherited?
-        theClazz = theClazz.getSuperclass();
-      }
-      catch (IllegalAccessException e) {
-        throw Throwables.propagate(e);
-      }
+    
+    @LifecycleStop
+    public synchronized void stop() {
+        lifecycle.stop();
     }
-
-    throw new ISE("Unknown field[%s] on class[%s]", fieldName, this.getClass());
-  }
+    
+    protected ScheduledExecutorService startMonitoring(List<Monitor> monitors) {
+        final ScheduledExecutorService globalScheduledExec = getScheduledExecutorFactory().create(1,
+                                                                                                  "Global--%d");
+        final MonitorScheduler monitorScheduler = new MonitorScheduler(getConfigFactory().build(MonitorSchedulerConfig.class),
+                                                                       globalScheduledExec,
+                                                                       getEmitter(),
+                                                                       monitors);
+        getLifecycle().addManagedInstance(monitorScheduler);
+        return globalScheduledExec;
+    }
+    
+    protected void checkFieldNotSetAndSet(String fieldName,
+                                          Object value) {
+        Class<?> theClazz = this.getClass();
+        while (theClazz != null && theClazz != Object.class) {
+            try {
+                final Field field = theClazz.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                Preconditions.checkState(field.get(this) == null,
+                                         "Cannot set %s once it has already been set.",
+                                         fieldName);
+                
+                field.set(this,
+                          value);
+                return;
+            } catch (NoSuchFieldException e) {
+                // Perhaps it is inherited?
+                theClazz = theClazz.getSuperclass();
+            } catch (IllegalAccessException e) {
+                throw Throwables.propagate(e);
+            }
+        }
+        
+        throw new ISE("Unknown field[%s] on class[%s]",
+                      fieldName,
+                      this.getClass());
+    }
 }
